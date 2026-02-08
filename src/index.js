@@ -486,7 +486,11 @@ function initButtons() {
       button.role = "button";
       button.setAttribute("aria-pressed", "false");
       if (0 <= noteNumber) {
-        button.className = "border rounded pad";
+        if (label.includes("#")) {
+          button.className = "bg-dark-subtle border rounded pad";
+        } else {
+          button.className = "border rounded pad";
+        }
         const padHit = document.createElement("div");
         padHit.className = "pad-hit";
         padHit.dataset.index = noteNumber.toString();
@@ -498,7 +502,11 @@ function initButtons() {
         setMPEKeyEvents(padHit);
         allKeys[channelNumber].push(button);
       } else {
-        button.className = "btn btn-outline-info pad";
+        if (label === "⬆") {
+          button.className = "btn btn-outline-primary pad";
+        } else {
+          button.className = "btn btn-outline-danger pad";
+        }
         button.textContent = label;
         button.name = label;
         octaveButtons.push(button);
