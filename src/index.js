@@ -110,53 +110,307 @@ function setKeyColor(key, velocity, isActive) {
   }
 }
 
-function noteOn(channelNumber, target, pressure, pressed) {
-  const noteNumber = Number(target.dataset.index);
-  if (pressed[noteNumber]) return;
-  pressed[noteNumber] = true;
-  const velocity = Math.ceil(pressure * 127) || 64;
-  const padView = target.parentNode.querySelector(".pad-view");
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function toMidiValue(ratio) {
+  return Math.max(1, Math.round(ratio * 127));
+}
+
+function calcPitchBendRatio(event, padRect, inset) {
+  const { clientX: x, clientY: y } = event;
+  let ratio = 0;
+  let isOutside = false;
+  let direction = null;
+  if (x < padRect.left) {
+    ratio = 1 + (x - padRect.left) / inset;
+    isOutside = true;
+    direction = "horizontal";
+  } else if (x > padRect.right) {
+    ratio = 1 + (padRect.right - x) / inset;
+    isOutside = true;
+    direction = "horizontal";
+  } else if (y < padRect.top) {
+    ratio = 1 + (y - padRect.top) / inset;
+    isOutside = true;
+    direction = "vertical";
+  } else if (y > padRect.bottom) {
+    ratio = 1 + (padRect.bottom - y) / inset;
+    isOutside = true;
+    direction = "vertical";
+  }
+  return {
+    ratio: clamp(ratio, 0, 1),
+    isOutside,
+    direction,
+  };
+}
+
+function calcContinuousPitchBend(event, state) {
+  const semitoneDiff = state.toNote - state.fromNote;
+  let ratio = 1;
+  if (state.targetPadHit && state.currentPadHit) {
+    const fromRect = state.currentPadHit.getBoundingClientRect();
+    const toRect = state.targetPadHit.getBoundingClientRect();
+    const { clientX: x, clientY: y } = event;
+    if (state.bendDirection === "horizontal") {
+      const overlapLeft = Math.max(fromRect.left, toRect.left);
+      const overlapRight = Math.min(fromRect.right, toRect.right);
+      const overlapWidth = overlapRight - overlapLeft;
+      const relativeX = x - overlapLeft;
+      ratio = clamp(relativeX / overlapWidth, 0, 1);
+    } else if (state.bendDirection === "vertical") {
+      const overlapTop = Math.max(fromRect.top, toRect.top);
+      const overlapBottom = Math.min(fromRect.bottom, toRect.bottom);
+      const overlapHeight = overlapBottom - overlapTop;
+      const relativeY = y - overlapTop;
+      ratio = clamp(relativeY / overlapHeight, 0, 1);
+    }
+  } else if (state.currentPadHit) {
+    const padRect = state.currentPadHit.getBoundingClientRect();
+    const inset = padRect.width * 0.1;
+    const result = calcPitchBendRatio(event, padRect, inset);
+    ratio = result.isOutside ? result.ratio : 1;
+    if (!state.bendDirection) {
+      state.bendDirection = result.isOutside ? result.direction : null;
+    }
+  } else {
+    state.bendDirection = null;
+  }
+  const channel = midy.channels[state.channel];
+  const sensitivityInSemitones = channel.state.pitchWheelSensitivity * 128 * 2;
+  const bend = Math.round(
+    8192 + 8192 * semitoneDiff * ratio / sensitivityInSemitones,
+  );
+  return bend;
+}
+
+function calcExpressionFromMovement(event, state) {
+  if (!state.currentPadHit || !state.bendDirection) return null;
+  const padRect = state.currentPadHit.parentNode.getBoundingClientRect();
+  const x = event.clientX;
+  const y = event.clientY;
+  let ratio;
+  if (state.bendDirection === "horizontal") {
+    const relativeY = clamp(y - padRect.top, 0, padRect.height);
+    ratio = 1 - (relativeY / padRect.height);
+  } else {
+    const relativeX = clamp(x - padRect.left, 0, padRect.width);
+    ratio = relativeX / padRect.width;
+  }
+  return toMidiValue(ratio);
+}
+
+function getCenter(rect) {
+  return {
+    x: rect.left + rect.width / 2,
+    y: rect.top + rect.height / 2,
+  };
+}
+
+function getHitOrientation(padA, padB) {
+  const c1 = getCenter(padA.getBoundingClientRect());
+  const c2 = getCenter(padB.getBoundingClientRect());
+  const dx = Math.abs(c1.x - c2.x);
+  const dy = Math.abs(c1.y - c2.y);
+  return dx > dy ? "horizontal" : "vertical";
+}
+
+function calcVelocityFromY(event, padHit) {
+  const rect = padHit.getBoundingClientRect();
+  const y = event.clientY - rect.top;
+  const ratio = 1 - clamp(y / rect.height, 0, 1);
+  return toMidiValue(ratio);
+}
+
+function calcInitialChordExpression(event, padA, padB) {
+  const r1 = padA.getBoundingClientRect();
+  const r2 = padB.getBoundingClientRect();
+  const left = Math.min(r1.left, r2.left);
+  const right = Math.max(r1.right, r2.right);
+  const ratio = clamp((event.clientX - left) / (right - left), 0, 1);
+  return Math.round(ratio * 127);
+}
+
+function createMPEPointerState(channel) {
+  return {
+    channel,
+    baseNotes: new Set(),
+    padHits: new Set(),
+    baseCenterNote: null,
+    chordExpression: 64,
+    initialOrientation: null,
+    currentPadHit: null,
+    targetPadHit: null,
+    fromNote: null,
+    toNote: null,
+    bendPadRect: null,
+    activeView: null,
+    bendDirection: null,
+  };
+}
+
+function highlightPad(padHit, velocity = 64) {
+  const padView = padHit.parentNode.querySelector(".pad-view");
   setKeyColor(padView, velocity, true);
-  target.setAttribute("aria-pressed", "true");
-  midy.noteOn(channelNumber, noteNumber, velocity);
-  // midy.setPolyphonicKeyPressure(channelNumber, noteNumber, velocity);
+  return padView;
 }
 
-function noteOff(channelNumber, target, pressure, pressed) {
-  const noteNumber = Number(target.dataset.index);
-  if (!pressed[noteNumber]) return;
-  pressed[noteNumber] = false;
-  const velocity = Math.ceil(pressure * 127) || 64;
-  const padView = target.parentNode.querySelector(".pad-view");
-  setKeyColor(padView, 0, false);
-  target.setAttribute("aria-pressed", "false");
-  midy.noteOff(channelNumber, noteNumber, velocity);
+function clearPadColor(padHit) {
+  const padView = padHit.parentNode.querySelector(".pad-view");
+  padView.style.removeProperty("background");
 }
 
-function handleMove(channelNumber, event, pressed) {
-  if (event.buttons === 0) return;
-  if (!pointerMap.has(event.pointerId)) {
-    pointerMap.set(event.pointerId, new Set());
+function mpePointerDown(event, padHit) {
+  padHit.setPointerCapture(event.pointerId);
+  let state = mpePointers.get(event.pointerId);
+  if (!state) {
+    const channel = allocChannel();
+    if (channel == null) return;
+    state = createMPEPointerState(channel);
+    mpePointers.set(event.pointerId, state);
   }
-  const activeHits = pointerMap.get(event.pointerId);
-  const elements = document.elementsFromPoint(event.clientX, event.clientY);
-  const currentHits = new Set();
-  for (let i = 0; i < elements.length; i++) {
-    if (elements[i].classList.contains("pad-hit")) {
-      currentHits.add(elements[i]);
+  const note = Number(padHit.dataset.index);
+  if (state.baseNotes.has(note)) return;
+  if (state.baseNotes.size === 0) {
+    if (state.initialOrientation !== "vertical") {
+      state.chordExpression = calcVelocityFromY(event, padHit);
+    }
+    midy.setControlChange(state.channel, 11, state.chordExpression);
+  }
+  state.activeView = highlightPad(padHit, state.chordExpression);
+  if (state.baseCenterNote == null) {
+    state.baseCenterNote = note;
+    midy.setPitchBend(state.channel, 8192);
+  }
+  midy.noteOn(state.channel, note, 127);
+  state.baseNotes.add(note);
+  state.padHits.add(padHit);
+  state.currentPadHit = padHit;
+  state.fromNote = state.baseCenterNote ?? note;
+  state.toNote = note;
+  state.bendPadRect = padHit.getBoundingClientRect();
+}
+
+function mpePointerUp(event) {
+  const state = mpePointers.get(event.pointerId);
+  if (!state) return;
+  state.padHits.forEach(clearPadColor);
+  state.baseNotes.forEach((note) => midy.noteOff(state.channel, note));
+  releaseChannel(state.channel);
+  mpePointers.delete(event.pointerId);
+}
+
+function handlePointerDown(event, panel) {
+  if (!isInsidePanel(event)) return;
+  panel.setPointerCapture(event.pointerId);
+  const hits = document.elementsFromPoint(event.clientX, event.clientY)
+    .filter((el) => el.classList?.contains("pad-hit"));
+  if (hits.length === 0 || hits.length > 2) return;
+  let state = mpePointers.get(event.pointerId);
+  if (!state) {
+    const channel = allocChannel();
+    if (channel == null) return;
+    state = createMPEPointerState(channel);
+    mpePointers.set(event.pointerId, state);
+  }
+  if (hits.length === 2) {
+    state.initialOrientation = getHitOrientation(hits[0], hits[1]);
+    if (state.initialOrientation === "vertical") {
+      state.chordExpression = calcInitialChordExpression(
+        event,
+        hits[0],
+        hits[1],
+      );
+      midy.setControlChange(state.channel, 11, state.chordExpression);
     }
   }
-  for (const element of currentHits) {
-    if (!activeHits.has(element)) {
-      noteOn(channelNumber, element, event.pressure, pressed);
+  hits.forEach((padHit) => mpePointerDown(event, padHit));
+  mpeHitMap.set(event.pointerId, new Set(hits));
+}
+
+function handlePointerMove(event) {
+  const state = mpePointers.get(event.pointerId);
+  if (!state) return;
+  const hits = document.elementsFromPoint(event.clientX, event.clientY)
+    .filter((el) => el.classList?.contains("pad-hit"));
+  const newHitSet = new Set(hits);
+  mpeHitMap.set(event.pointerId, newHitSet);
+  state.padHits.forEach((padHit) => {
+    if (!newHitSet.has(padHit)) clearPadColor(padHit);
+  });
+  if (hits.length === 2 && state.baseNotes.size === 1) {
+    const pad = hits.find((p) => Number(p.dataset.index) !== state.fromNote);
+    if (pad) {
+      state.toNote = Number(pad.dataset.index);
+      const padA = hits.find((p) => Number(p.dataset.index) === state.fromNote);
+      if (padA) {
+        state.currentPadHit = padA;
+        state.targetPadHit = pad;
+        state.bendDirection = getHitOrientation(padA, pad);
+      }
     }
+  } else if (hits.length === 1) {
+    const note = Number(hits[0].dataset.index);
+    state.currentPadHit = hits[0];
+    state.targetPadHit = null;
+    state.toNote = note;
+  } else if (hits.length === 0) {
+    state.currentPadHit = null;
+    state.targetPadHit = null;
+    state.toNote = state.fromNote;
   }
-  for (const element of activeHits) {
-    if (!currentHits.has(element)) {
-      noteOff(channelNumber, element, event.pressure, pressed);
+  if (state.baseNotes.size > 1 && hits.length >= 1) {
+    state.currentPadHit = hits[0];
+    state.bendDirection = state.initialOrientation;
+    const expression = calcExpressionFromMovement(event, state);
+    if (expression !== null) {
+      midy.setControlChange(state.channel, 11, expression);
+      hits.forEach((padHit) => highlightPad(padHit, expression));
+    } else {
+      hits.forEach((padHit) => highlightPad(padHit, state.chordExpression));
     }
+    state.padHits = newHitSet;
+    return;
   }
-  pointerMap.set(event.pointerId, currentHits);
+  const bend = calcContinuousPitchBend(event, state);
+  if (bend !== undefined) {
+    midy.setPitchBend(state.channel, bend);
+    const expression = calcExpressionFromMovement(event, state);
+    if (expression !== null) {
+      midy.setControlChange(state.channel, 11, expression);
+      hits.forEach((padHit) => highlightPad(padHit, expression));
+    } else {
+      hits.forEach((padHit) => highlightPad(padHit, state.chordExpression));
+    }
+  } else {
+    hits.forEach((padHit) => highlightPad(padHit, state.chordExpression));
+  }
+  state.padHits = newHitSet;
+}
+
+function handlePointerUp(event, panel) {
+  if (!mpeHitMap.has(event.pointerId)) return;
+  mpePointerUp(event);
+  mpeHitMap.get(event.pointerId).clear();
+  mpeHitMap.delete(event.pointerId);
+  try {
+    panel.releasePointerCapture(event.pointerId);
+  } catch { /* skip */ }
+}
+
+function setMPEKeyEvents(panel) {
+  panel.addEventListener(
+    "pointerdown",
+    (event) => handlePointerDown(event, panel),
+  );
+  panel.addEventListener("pointermove", handlePointerMove);
+  panel.addEventListener("pointerup", (event) => handlePointerUp(event, panel));
+  panel.addEventListener(
+    "pointercancel",
+    (event) => handlePointerUp(event, panel),
+  );
 }
 
 function isInsidePanel(event) {
@@ -167,53 +421,6 @@ function isInsidePanel(event) {
     event.clientY >= rect.top &&
     event.clientY <= rect.bottom
   );
-}
-
-function setKeyEvents(channelNumber, key) {
-  const pressed = new Array(128).fill(false);
-  key.addEventListener("pointerdown", (event) => {
-    if (!isInsidePanel(event)) return;
-    key.setPointerCapture(event.pointerId);
-    handleMove(channelNumber, event, pressed);
-  });
-  key.addEventListener("pointermove", (event) => {
-    if (isInsidePanel(event)) {
-      handleMove(channelNumber, event, pressed);
-    } else {
-      releasePointer(channelNumber, event, pressed);
-    }
-  });
-  function releasePointer(channelNumber, event, pressed) {
-    const activeHits = pointerMap.get(event.pointerId);
-    if (activeHits) {
-      for (const element of activeHits) {
-        noteOff(channelNumber, element, event.pressure, pressed);
-      }
-      activeHits.clear();
-      pointerMap.delete(event.pointerId);
-    }
-    try {
-      key.releasePointerCapture(event.pointerId);
-    } catch { /* skip */ }
-  }
-  key.addEventListener("pointerup", (event) => {
-    releasePointer(channelNumber, event, pressed);
-  });
-  key.addEventListener("pointercancel", (event) => {
-    releasePointer(channelNumber, event, pressed);
-  });
-  panel.addEventListener("pointerleave", () => {
-    if (midy.isPlaying) return;
-    midy.stopNotes(0, true, midy.audioContext.currentTime);
-    pressed.fill(false);
-    pointerMap.forEach((activeHits) => {
-      activeHits.clear();
-    });
-    pointerMap.clear();
-    document.querySelectorAll(".pad-view").forEach((view) => {
-      view.style.removeProperty("background");
-    });
-  });
 }
 
 function getTranslatedLabel(engLabel) {
@@ -288,7 +495,7 @@ function initButtons() {
         padView.textContent = getTranslatedLabel(label);
         padView.name = label;
         button.append(padHit, padView);
-        setKeyEvents(channelNumber, padHit);
+        setMPEKeyEvents(padHit);
         allKeys[channelNumber].push(button);
       } else {
         button.className = "btn btn-outline-info pad";
@@ -343,6 +550,24 @@ function initConfig() {
   });
 }
 
+const freeChannels = new Array(14);
+for (let i = 0; i < 14; i++) {
+  freeChannels[i] = i + 1;
+}
+
+function allocChannel() {
+  return freeChannels.shift() ?? null;
+}
+
+function releaseChannel(ch) {
+  if (1 <= ch && ch < 15) {
+    freeChannels.push(ch);
+  }
+}
+
+const mpeHitMap = new Map();
+const mpePointers = new Map();
+
 // deno-fmt-ignore
 const baseLabels = [
   "C#4", "D#4", "F#4", "⬇",
@@ -355,7 +580,6 @@ const noteMap = {
   ja: { C: "ド", D: "レ", E: "ミ", F: "ファ", G: "ソ", A: "ラ", B: "シ" },
   en: { C: "C", D: "D", E: "E", F: "F", G: "G", A: "A", B: "B" },
 };
-const pointerMap = new Map();
 const currOctaves = [4, 4];
 let handMode = 1;
 
@@ -369,6 +593,13 @@ await Promise.all([
   midy.loadSoundFont(`${soundFontURL}/000.sf3`),
   midy.loadSoundFont(`${soundFontURL}/128.sf3`),
 ]);
+for (let i = 0; i < 16; i++) {
+  midy.setPitchBendRange(i, 1200);
+}
+midy.setBankMSB(9, 121);
+midy.setProgramChange(9, 0);
+midy.setMIDIPolyphonicExpression(0, 7);
+midy.setMIDIPolyphonicExpression(15, 7);
 initConfig();
 
 document.getElementById("toggleDarkMode").onclick = toggleDarkMode;
