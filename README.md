@@ -1,6 +1,6 @@
 # 4x4pad
 
-A 4x4 grid style MIDI controller powered by
+A 4x4 grid MPE MIDI controller powered by
 [Midy](https://github.com/marmooo/midy).
 
 ## Build
