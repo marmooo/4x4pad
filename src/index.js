@@ -39,7 +39,7 @@ async function setProgramChange(event) {
   const target = event.target;
   const host = target.getRootNode().host;
   const programNumber = target.selectedIndex;
-  const channelNumber = (host.id === "instrument-first") ? 0 : 1;
+  const channelNumber = (host.id === "instrument-first") ? 0 : 15;
   const channel = midy.channels[channelNumber];
   const bankNumber = channel.isDrum ? 128 : channel.bankLSB;
   const index = midy.soundFontTable[programNumber][bankNumber];
@@ -262,11 +262,11 @@ function clearPadColor(padHit) {
   padView.style.removeProperty("background");
 }
 
-function mpePointerDown(event, padHit) {
+function mpePointerDown(event, padHit, groupId) {
   padHit.setPointerCapture(event.pointerId);
   let state = mpePointers.get(event.pointerId);
   if (!state) {
-    const channel = allocChannel();
+    const channel = allocChannel(groupId);
     if (channel == null) return;
     state = createMPEPointerState(channel);
     mpePointers.set(event.pointerId, state);
@@ -302,7 +302,7 @@ function mpePointerUp(event) {
   mpePointers.delete(event.pointerId);
 }
 
-function handlePointerDown(event, panel) {
+function handlePointerDown(event, panel, groupId) {
   if (!isInsidePanel(event)) return;
   panel.setPointerCapture(event.pointerId);
   const hits = document.elementsFromPoint(event.clientX, event.clientY)
@@ -310,7 +310,7 @@ function handlePointerDown(event, panel) {
   if (hits.length === 0 || hits.length > 2) return;
   let state = mpePointers.get(event.pointerId);
   if (!state) {
-    const channel = allocChannel();
+    const channel = allocChannel(groupId);
     if (channel == null) return;
     state = createMPEPointerState(channel);
     mpePointers.set(event.pointerId, state);
@@ -326,7 +326,7 @@ function handlePointerDown(event, panel) {
       midy.setControlChange(state.channel, 11, state.chordExpression);
     }
   }
-  hits.forEach((padHit) => mpePointerDown(event, padHit));
+  hits.forEach((padHit) => mpePointerDown(event, padHit, groupId));
   mpeHitMap.set(event.pointerId, new Set(hits));
 }
 
@@ -400,10 +400,10 @@ function handlePointerUp(event, panel) {
   } catch { /* skip */ }
 }
 
-function setMPEKeyEvents(panel) {
+function setMPEKeyEvents(panel, groupId) {
   panel.addEventListener(
     "pointerdown",
-    (event) => handlePointerDown(event, panel),
+    (event) => handlePointerDown(event, panel, groupId),
   );
   panel.addEventListener("pointermove", handlePointerMove);
   panel.addEventListener("pointerup", (event) => handlePointerUp(event, panel));
@@ -429,13 +429,13 @@ function getTranslatedLabel(engLabel) {
   return map[engLabel[0]] + engLabel.slice(1);
 }
 
-function setChangeOctaveEvents(channelNumber, octaveButton) {
+function setChangeOctaveEvents(groupId, octaveButton) {
   octaveButton.addEventListener("pointerdown", () => {
     const direction = (octaveButton.name === "⬆") ? 1 : -1;
-    const nextOctave = currOctaves[channelNumber] + direction;
+    const nextOctave = currOctaves[groupId] + direction;
     if (nextOctave <= 0 || 11 <= nextOctave) return;
-    currOctaves[channelNumber] = nextOctave;
-    const buttons = allKeys[channelNumber];
+    currOctaves[groupId] = nextOctave;
+    const buttons = allKeys[groupId];
     for (let i = 0; i < buttons.length; i++) {
       const button = buttons[i];
       const padView = button.querySelector(".pad-view");
@@ -477,10 +477,10 @@ function toNoteNumber(note) {
 
 function initButtons() {
   const allKeys = [[], []];
-  document.querySelectorAll(".group").forEach((group, channelNumber) => {
+  document.querySelectorAll(".group").forEach((group, groupId) => {
     const octaveButtons = [];
-    for (let i = 0; i < baseLabels.length; i++) {
-      const label = baseLabels[i];
+    for (let j = 0; j < baseLabels.length; j++) {
+      const label = baseLabels[j];
       const noteNumber = toNoteNumber(label);
       const button = document.createElement("div");
       button.role = "button";
@@ -499,8 +499,8 @@ function initButtons() {
         padView.textContent = getTranslatedLabel(label);
         padView.name = label;
         button.append(padHit, padView);
-        setMPEKeyEvents(padHit);
-        allKeys[channelNumber].push(button);
+        setMPEKeyEvents(padHit, groupId);
+        allKeys[groupId].push(button);
       } else {
         if (label === "⬆") {
           button.className = "btn btn-outline-primary pad";
@@ -513,9 +513,9 @@ function initButtons() {
       }
       group.appendChild(button);
     }
-    for (let i = 0; i < octaveButtons.length; i++) {
-      const btn = octaveButtons[i];
-      setChangeOctaveEvents(channelNumber, btn);
+    for (let j = 0; j < octaveButtons.length; j++) {
+      const btn = octaveButtons[j];
+      setChangeOctaveEvents(groupId, btn);
     }
   });
   return allKeys;
@@ -524,7 +524,6 @@ function initButtons() {
 function initConfig() {
   const handlers = [
     (i, v) => midy.setControlChange(i, 1, v),
-    (i, v) => midy.setControlChange(i, 11, v),
     (i, v) => midy.setControlChange(i, 76, v),
     (i, v) => midy.setControlChange(i, 77, v),
     (i, v) => midy.setControlChange(i, 78, v),
@@ -533,15 +532,16 @@ function initConfig() {
   ];
   const configs = document.getElementById("config").querySelectorAll("div.col");
   configs.forEach((config, i) => {
+    const channelNumber = (i == 0) ? 0 : 15;
     const drum = config.querySelector("input[type=checkbox]");
     drum.addEventListener("change", (event) => {
       const instrument = config.querySelector("midi-instrument");
       instrument.parentNode.classList.toggle("d-none");
       if (event.target.checked) {
-        midy.setBankMSB(i, 120);
-        midy.setProgramChange(i, 0);
+        midy.setControlChange(channelNumber, 0, 120); // bankMSB
+        midy.setProgramChange(channelNumber, 0);
       } else {
-        midy.setBankMSB(i, 121);
+        midy.setControlChange(channelNumber, 0, 121); // bankMSB
         const select = instrument.shadowRoot.querySelector("select");
         select.selectedIndex = 0;
         select.dispatchEvent(new Event("change", { bubbles: true }));
@@ -552,24 +552,32 @@ function initConfig() {
       const handler = handlers[j];
       if (!handler) return;
       input.addEventListener("change", (event) => {
-        handler(i, event.target.value);
+        handler(channelNumber, event.target.value);
       });
     });
   });
 }
 
-const freeChannels = new Array(14);
-for (let i = 0; i < 14; i++) {
-  freeChannels[i] = i + 1;
+const lowerFreeChannels = new Array(7);
+const upperFreeChannels = new Array(7);
+for (let i = 0; i < 7; i++) {
+  lowerFreeChannels[i] = i + 1;
+  upperFreeChannels[i] = i + 8;
 }
 
-function allocChannel() {
-  return freeChannels.shift() ?? null;
+function allocChannel(groupId) {
+  if (groupId === 0) return lowerFreeChannels.shift() ?? null;
+  if (groupId === 1) return upperFreeChannels.shift() ?? null;
+  return null;
 }
 
-function releaseChannel(ch) {
-  if (1 <= ch && ch < 15) {
-    freeChannels.push(ch);
+function releaseChannel(channelNumber) {
+  if (1 <= channelNumber && channelNumber <= midy.lowerMPEMembers) {
+    lowerFreeChannels.push(channelNumber);
+    return;
+  }
+  if (15 - midy.upperMPEMembers <= channelNumber && channelNumber <= 14) {
+    upperFreeChannels.push(channelNumber);
   }
 }
 
