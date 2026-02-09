@@ -489,7 +489,7 @@ function initButtons() {
         if (label.includes("#")) {
           button.className = "bg-dark-subtle border rounded pad";
         } else {
-          button.className = "border rounded pad";
+          button.className = "bg-light-subtle border rounded pad";
         }
         const padHit = document.createElement("div");
         padHit.className = "pad-hit";
